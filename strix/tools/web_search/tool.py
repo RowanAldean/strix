@@ -136,6 +136,24 @@ def _exa_content(api_key: str, query: str, search_type: str, num_results: int) -
 _PARALLEL_MAX_CHARS = 12000
 
 
+def _parallel_result_content(results: list[tuple[str, str]]) -> str:
+    # Reserve every source header before spending the remaining budget on excerpts.
+    header_chars = sum(len(header) for header, _ in results) + 2 * (len(results) - 1)
+    remaining = max(0, _PARALLEL_MAX_CHARS - header_chars)
+    blocks: list[str] = []
+    truncated = False
+    for header, excerpts in results:
+        excerpt = excerpts[: max(0, remaining - 2)]
+        blocks.append(f"{header}\n\n{excerpt}" if excerpt else header)
+        if excerpt:
+            remaining -= len(excerpt) + 2
+        truncated |= len(excerpt) < len(excerpts)
+    content = "\n\n".join(blocks)
+    if truncated:
+        content += "\n[excerpts truncated to preserve source links]"
+    return content
+
+
 def _parallel_content(api_key: str, query: str) -> str:
     with requests.post(
         "https://api.parallel.ai/v1/search",
@@ -159,7 +177,7 @@ def _parallel_content(api_key: str, query: str) -> str:
     if not results:
         return "No web search results found."
 
-    blocks: list[str] = []
+    blocks: list[tuple[str, str]] = []
     for item in results[:5]:
         if not isinstance(item, dict):
             continue
@@ -167,19 +185,17 @@ def _parallel_content(api_key: str, query: str) -> str:
         if not result.get("url"):
             continue
         url = str(result["url"])
-        parts = [f"### {result.get('title') or url}\n{url}"]
+        header = f"### {result.get('title') or url}\n{url}"
+        parts: list[str] = []
         excerpts: list[Any] | None = result.get("excerpts")
         if isinstance(excerpts, list):
             parts.extend(
                 text.strip() for text in excerpts if isinstance(text, str) and text.strip()
             )
-        blocks.append("\n\n".join(parts))
+        blocks.append((header, "\n\n".join(parts)))
     if not blocks:
         raise ValueError("Parallel response has no usable results")
-    content = "\n\n".join(blocks)
-    if len(content) > _PARALLEL_MAX_CHARS:
-        return f"{content[:_PARALLEL_MAX_CHARS]}\n[truncated at {_PARALLEL_MAX_CHARS} characters]"
-    return content
+    return _parallel_result_content(blocks)
 
 
 def _normalize_url(url: str) -> str:
