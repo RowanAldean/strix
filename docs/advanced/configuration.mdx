@@ -106,7 +106,9 @@ affecting the agents that do the actual testing.
   API key for [Parallel Search](https://docs.parallel.ai/search/search-quickstart).
   Set `STRIX_WEB_SEARCH_PROVIDER=parallel` to use it for the built-in `web_search` tool.
   Requests use `/v1/search` in `fast` mode, returning up to five source URLs with
-  relevant excerpts. Output is capped at 12,000 characters plus a truncation notice.
+  relevant excerpts. Excerpts are shortened to keep output within 12,000 characters
+  plus a truncation notice. Source titles and URLs are always preserved, even if
+  those headers alone exceed the budget.
   Queries may contain up to 5,000 characters; the full query is the search objective,
   with its first 200 characters also supplied as a search query.
   This uses the authenticated API, not the free Search MCP. `web_get_contents`

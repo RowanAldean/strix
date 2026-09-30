@@ -551,8 +551,50 @@ def test_parallel_caps_output(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = tool._parallel_content("key", "vendor advisory")
     assert result.startswith("### https://vendor.example\nhttps://vendor.example")
-    assert result.endswith("\n[truncated at 12000 characters]")
-    assert len(result) == 12000 + len("\n[truncated at 12000 characters]")
+    notice = "\n[excerpts truncated to preserve source links]"
+    assert result.endswith(notice)
+    assert len(result) == 12000 + len(notice)
+
+
+@pytest.mark.parametrize("first_excerpt_size", [11920, 20000])
+def test_parallel_truncation_keeps_all_source_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    first_excerpt_size: int,
+) -> None:
+    results = [
+        {
+            "title": f"Vendor advisory {index}",
+            "url": f"https://vendor.example/advisory/{index}/" + "a" * 100,
+            "excerpts": ["x" * (first_excerpt_size if index == 0 else 2000)],
+        }
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_a, **_kw: _FakeResponse({"results": results}),
+    )
+    content = tool._parallel_content("key", "vendor advisories")
+    for result in results:
+        assert f"### {result['title']}\n{result['url']}" in content
+    notice = "\n[excerpts truncated to preserve source links]"
+    assert content.endswith(notice)
+    assert len(content) <= 12000 + len(notice)
+
+
+@pytest.mark.parametrize("spare_chars", [-1, 0, 1, 2, 3])
+def test_parallel_keeps_headers_when_no_excerpt_fits(
+    monkeypatch: pytest.MonkeyPatch,
+    spare_chars: int,
+) -> None:
+    headers = ["### First\nhttps://first.example", "### Second\nhttps://second.example"]
+    header_text = "\n\n".join(headers)
+    monkeypatch.setattr(tool, "_PARALLEL_MAX_CHARS", len(header_text) + spare_chars)
+    content = tool._parallel_result_content([(header, "excerpt") for header in headers])
+    assert all(header in content for header in headers)
+    notice = "\n[excerpts truncated to preserve source links]"
+    assert content.endswith(notice)
+    assert len(content) <= max(len(header_text), tool._PARALLEL_MAX_CHARS) + len(notice)
 
 
 @pytest.mark.usefixtures("_parallel_settings")
