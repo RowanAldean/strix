@@ -36,8 +36,8 @@ def _missing_web_search_vars(integrations: IntegrationSettings) -> list[str]:
 def validate_environment() -> None:
     logger.info("Validating environment")
     console = Console()
-    missing_required_vars = []
-    missing_optional_vars = []
+    missing_required_vars: list[str] = []
+    missing_optional_vars: list[str] = []
 
     settings = load_settings()
 
@@ -114,7 +114,8 @@ def validate_environment() -> None:
                         style="white",
                     )
                 elif var == "PARALLEL_API_KEY":
-                    error_text.append("• PARALLEL_API_KEY", style="bold cyan")
+                    error_text.append("• ", style="white")
+                    error_text.append("PARALLEL_API_KEY", style="bold cyan")
                     error_text.append(" - API key for Parallel web search\n", style="white")
                 elif var == "STRIX_REASONING_EFFORT":
                     error_text.append("• ", style="white")

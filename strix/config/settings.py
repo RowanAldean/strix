@@ -221,6 +221,11 @@ class IntegrationSettings(BaseSettings):
         repr=False,
     )
 
+    @field_validator("web_search_provider", "exa_search_type", mode="before")
+    @classmethod
+    def _normalize_case(cls, value: object) -> object:
+        return _lowercase(value)
+
 
 class ViewerSettings(BaseSettings):
     model_config = _BASE_CONFIG

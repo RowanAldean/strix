@@ -300,12 +300,67 @@ def test_do_get_contents_needs_an_exa_key(monkeypatch: pytest.MonkeyPatch) -> No
     assert "EXA_API_KEY" in result["error"]
 
 
-def test_do_get_contents_refuses_a_perplexity_pinned_provider(
+def test_do_get_contents_uses_parallel_extract_when_provider_is_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Settings:
         integrations = IntegrationSettings(
             EXA_API_KEY="ek",
+            PARALLEL_API_KEY="parallel-key",
+            STRIX_WEB_SEARCH_PROVIDER="parallel",
+        )
+
+    monkeypatch.setattr(tool, "load_settings", _Settings)
+    monkeypatch.setattr(
+        tool,
+        "_parallel_page_text",
+        lambda *_a: ("parallel page", {"https://ex.example"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        tool,
+        "_exa_page_text",
+        lambda *_a: pytest.fail("Pinned Parallel must not send URLs to Exa"),
+    )
+
+    result = tool._do_get_contents(["https://ex.example"])
+
+    assert result == {
+        "success": True,
+        "urls": ["https://ex.example"],
+        "provider": "parallel",
+        "content": "parallel page",
+    }
+
+
+def test_do_get_contents_pinned_parallel_requires_parallel_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Settings:
+        integrations = IntegrationSettings(
+            EXA_API_KEY="ek",
+            STRIX_WEB_SEARCH_PROVIDER="parallel",
+        )
+
+    monkeypatch.setattr(tool, "load_settings", _Settings)
+    monkeypatch.setattr(
+        tool,
+        "_exa_page_text",
+        lambda *_a: pytest.fail("Pinned Parallel must not fall back to Exa"),
+    )
+
+    result = tool._do_get_contents(["https://ex.example"])
+
+    assert result["success"] is False
+    assert "PARALLEL_API_KEY" in result["error"]
+    assert "EXA_API_KEY" not in result["error"]
+
+
+def test_do_get_contents_refuses_a_perplexity_pinned_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Settings:
+        integrations = IntegrationSettings(
             PERPLEXITY_API_KEY="pk",
             STRIX_WEB_SEARCH_PROVIDER="perplexity",
         )
@@ -316,6 +371,7 @@ def test_do_get_contents_refuses_a_perplexity_pinned_provider(
 
     assert result["success"] is False
     assert "web_search" in result["error"]
+    assert "EXA_API_KEY" not in result["error"]
 
 
 def test_do_get_contents_returns_page_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,6 +471,61 @@ def test_do_get_contents_sanitizes_a_network_error(monkeypatch: pytest.MonkeyPat
     assert "ek" not in result["error"]
 
 
+def test_parallel_page_text_requests_full_content_and_renders_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(url=url, **kwargs)
+        return _FakeResponse(
+            {
+                "results": [
+                    {
+                        "url": "https://vendor.example/advisory",
+                        "title": " Vendor advisory ",
+                        "excerpts": ["Focused excerpt."],
+                        "full_content": "  Full advisory body.  ",
+                    },
+                    {
+                        "url": "https://vendor.example/docs",
+                        "title": None,
+                        "excerpts": ["  Excerpt fallback.  "],
+                        "full_content": None,
+                    },
+                    {"url": "   ", "excerpts": ["Malformed."]},
+                ],
+                "errors": [{"url": "https://blocked.example", "error_type": "fetch_error"}],
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    content, fetched = tool._parallel_page_text(
+        "parallel-key",
+        ["https://vendor.example/advisory", "https://vendor.example/docs"],
+    )
+
+    assert captured["url"] == "https://api.parallel.ai/v1/extract"
+    assert captured["headers"] == {
+        "x-api-key": "parallel-key",
+        "Content-Type": "application/json",
+    }
+    assert captured["json"] == {
+        "urls": ["https://vendor.example/advisory", "https://vendor.example/docs"],
+        "advanced_settings": {"full_content": True},
+    }
+    assert captured["timeout"] == 300
+    assert content == (
+        "### Vendor advisory\nhttps://vendor.example/advisory\n\nFull advisory body.\n\n"
+        "### https://vendor.example/docs\nhttps://vendor.example/docs\n\nExcerpt fallback."
+    )
+    assert fetched == {
+        "https://vendor.example/advisory",
+        "https://vendor.example/docs",
+    }
+
+
 def test_do_search_reports_the_provider_it_used(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Settings:
         integrations = IntegrationSettings(EXA_API_KEY="ek")
@@ -459,6 +570,18 @@ def test_parallel_selection_is_opt_in(
         assert result == expected
 
 
+def test_web_search_provider_and_exa_type_are_case_insensitive() -> None:
+    integrations = IntegrationSettings.model_validate(
+        {
+            "STRIX_WEB_SEARCH_PROVIDER": " PARALLEL ",
+            "STRIX_EXA_SEARCH_TYPE": "DEEP-REASONING",
+        }
+    )
+
+    assert integrations.web_search_provider == "parallel"
+    assert integrations.exa_search_type == "deep-reasoning"
+
+
 @pytest.fixture
 def _parallel_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Settings:
@@ -492,7 +615,7 @@ def test_parallel_request_and_tool_response(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
     monkeypatch.setattr(requests, "post", fake_post)
-    query = "Find affected versions and mitigations in the vendor advisory. " * 4
+    query = ("Find affected versions and mitigations in the vendor advisory. " * 4).strip()
     result = tool._do_search(query)
     assert captured["url"] == "https://api.parallel.ai/v1/search"
     assert captured["headers"] == {
@@ -515,6 +638,25 @@ def test_parallel_request_and_tool_response(monkeypatch: pytest.MonkeyPatch) -> 
         "Affected versions.\n\nFixed versions.\n\n"
         "### https://vendor.example/docs\nhttps://vendor.example/docs",
     }
+
+
+@pytest.mark.usefixtures("_parallel_settings")
+def test_parallel_search_strips_query_before_validation_and_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(_url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"results": [{"url": "https://vendor.example"}]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    result = tool._do_search(" " * 250 + "vendor advisory ")
+
+    assert result["success"] is True
+    assert result["query"] == "vendor advisory"
+    assert captured["json"]["objective"] == "vendor advisory"
+    assert captured["json"]["search_queries"] == ["vendor advisory"]
 
 
 @pytest.mark.usefixtures("_parallel_settings")
@@ -554,6 +696,60 @@ def test_parallel_caps_output(monkeypatch: pytest.MonkeyPatch) -> None:
     notice = "\n[excerpts truncated to preserve source links]"
     assert result.endswith(notice)
     assert len(result) == 12000 + len(notice)
+
+
+def test_parallel_filters_before_capping_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    malformed: list[Any] = [
+        "not an object",
+        {"url": "   ", "title": "Blank URL"},
+        {"title": "Missing URL"},
+    ]
+    usable = [
+        {
+            "url": f" https://vendor.example/{index} ",
+            "title": "   " if index == 0 else f" Result {index} ",
+            "excerpts": [f"Excerpt {index}."],
+        }
+        for index in range(6)
+    ]
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_a, **_kw: _FakeResponse({"results": [*malformed, *usable]}),
+    )
+
+    content = tool._parallel_content("key", "vendor advisories")
+
+    for index in range(5):
+        assert f"https://vendor.example/{index}" in content
+    assert "https://vendor.example/5" not in content
+    assert "### https://vendor.example/0\nhttps://vendor.example/0" in content
+    assert "Blank URL" not in content
+
+
+def test_parallel_spreads_excerpt_budget_and_strips_trailing_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = ["### First\nhttps://first.example", "### Second\nhttps://second.example"]
+    header_text = "\n\n".join(headers)
+    monkeypatch.setattr(tool, "_PARALLEL_MAX_CHARS", len(header_text) + 24)
+
+    content = tool._parallel_result_content(
+        [(headers[0], "a" * 40 + "\n\n"), (headers[1], "b" * 40 + "\n\n")]
+    )
+
+    assert f"{headers[0]}\n\na" in content
+    assert f"{headers[1]}\n\nb" in content
+    assert "\n\n\n\n### Second" not in content
+    assert content.endswith("[excerpts truncated to preserve source links]")
+
+
+def test_parallel_strips_trailing_excerpt_whitespace() -> None:
+    content = tool._parallel_result_content(
+        [("### Result\nhttps://result.example", "Complete excerpt.\n\n")]
+    )
+
+    assert content == "### Result\nhttps://result.example\n\nComplete excerpt."
 
 
 @pytest.mark.parametrize("first_excerpt_size", [11920, 20000])
