@@ -139,16 +139,38 @@ _PARALLEL_MAX_CHARS = 12000
 def _parallel_result_content(results: list[tuple[str, str]]) -> str:
     header_chars = sum(len(header) for header, _ in results) + 2 * (len(results) - 1)
     remaining = max(0, _PARALLEL_MAX_CHARS - header_chars)
+    excerpts = [excerpt.rstrip() for _, excerpt in results]
+    allocations = [0] * len(results)
+    nonempty = [index for index, excerpt in enumerate(excerpts) if excerpt]
+    full_cost = sum(len(excerpts[index]) + 2 for index in nonempty)
+
+    if full_cost <= remaining:
+        for index in nonempty:
+            allocations[index] = len(excerpts[index])
+    else:
+        selected = nonempty[: min(len(nonempty), remaining // 3)]
+        content_budget = remaining - 2 * len(selected)
+        pending = set(selected)
+        while pending:
+            share = content_budget // len(pending)
+            satisfied = [index for index in pending if len(excerpts[index]) <= share]
+            if not satisfied:
+                base, extra = divmod(content_budget, len(pending))
+                for offset, index in enumerate(sorted(pending)):
+                    allocations[index] = base + (offset < extra)
+                break
+            for index in satisfied:
+                allocations[index] = len(excerpts[index])
+                content_budget -= allocations[index]
+                pending.remove(index)
+
     blocks: list[str] = []
-    truncated = False
-    for index, (header, excerpts) in enumerate(results):
-        share = remaining // (len(results) - index)
-        excerpt_slice = excerpts[: max(0, share - 2)]
-        excerpt = excerpt_slice.rstrip()
+    for index, (header, _) in enumerate(results):
+        excerpt = excerpts[index][: allocations[index]].rstrip()
         blocks.append(f"{header}\n\n{excerpt}" if excerpt else header)
-        if excerpt:
-            remaining -= len(excerpt) + 2
-        truncated |= len(excerpt_slice) < len(excerpts)
+    truncated = any(
+        allocation < len(excerpt) for allocation, excerpt in zip(allocations, excerpts, strict=True)
+    )
     content = "\n\n".join(blocks)
     if truncated:
         content += "\n[excerpts truncated to preserve source links]"
@@ -234,7 +256,10 @@ def _exa_page_text(api_key: str, urls: list[str]) -> tuple[str, set[str]]:
 def _parallel_page_text(api_key: str, urls: list[str]) -> tuple[str, set[str]]:
     """Fetch page text and report which of the requested URLs Parallel returned."""
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"urls": urls, "advanced_settings": {"full_content": True}}
+    payload = {
+        "urls": urls,
+        "advanced_settings": {"full_content": {"max_chars_per_result": _EXA_PAGE_MAX_CHARS}},
+    }
     with requests.post(
         "https://api.parallel.ai/v1/extract",
         headers=headers,
@@ -270,6 +295,10 @@ def _parallel_page_text(api_key: str, urls: list[str]) -> tuple[str, set[str]]:
                 )
         if not content:
             continue
+        if len(content) > _EXA_PAGE_MAX_CHARS:
+            content = (
+                f"{content[:_EXA_PAGE_MAX_CHARS]}\n[truncated at {_EXA_PAGE_MAX_CHARS} characters]"
+            )
         raw_title = result.get("title")
         title = raw_title.strip() if isinstance(raw_title, str) else ""
         blocks.append(f"### {title or url}\n{url}\n\n{content}")

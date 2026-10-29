@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import requests
@@ -513,7 +513,7 @@ def test_parallel_page_text_requests_full_content_and_renders_pages(
     }
     assert captured["json"] == {
         "urls": ["https://vendor.example/advisory", "https://vendor.example/docs"],
-        "advanced_settings": {"full_content": True},
+        "advanced_settings": {"full_content": {"max_chars_per_result": tool._EXA_PAGE_MAX_CHARS}},
     }
     assert captured["timeout"] == 300
     assert content == (
@@ -524,6 +524,107 @@ def test_parallel_page_text_requests_full_content_and_renders_pages(
         "https://vendor.example/advisory",
         "https://vendor.example/docs",
     }
+
+
+@pytest.mark.parametrize(
+    ("body", "exception", "message"),
+    [
+        (cast("Any", []), TypeError, "must be an object"),
+        ({"results": []}, ValueError, "no page contents"),
+        (
+            {
+                "results": [
+                    {
+                        "url": "https://empty.example",
+                        "full_content": "   ",
+                        "excerpts": ["  "],
+                    }
+                ]
+            },
+            ValueError,
+            "no page contents",
+        ),
+    ],
+)
+def test_parallel_page_text_rejects_empty_or_contentless_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    body: Any,
+    exception: type[Exception],
+    message: str,
+) -> None:
+    monkeypatch.setattr(requests, "post", lambda *_a, **_kw: _FakeResponse(body))
+
+    with pytest.raises(exception, match=message):
+        tool._parallel_page_text("parallel-key", ["https://empty.example"])
+
+
+def test_parallel_page_text_truncates_a_long_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = "A" * (tool._EXA_PAGE_MAX_CHARS + 500)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_a, **_kw: _FakeResponse(
+            {
+                "results": [
+                    {
+                        "url": "https://long.example",
+                        "full_content": body,
+                        "excerpts": [],
+                    }
+                ]
+            }
+        ),
+    )
+
+    content, fetched = tool._parallel_page_text("parallel-key", ["https://long.example"])
+
+    assert content.count("A") == tool._EXA_PAGE_MAX_CHARS
+    assert f"[truncated at {tool._EXA_PAGE_MAX_CHARS} characters]" in content
+    assert fetched == {"https://long.example"}
+
+
+def test_do_get_contents_reports_parallel_extract_partial_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Settings:
+        integrations = IntegrationSettings(
+            PARALLEL_API_KEY="parallel-key",
+            STRIX_WEB_SEARCH_PROVIDER="parallel",
+        )
+
+    monkeypatch.setattr(tool, "load_settings", _Settings)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_a, **_kw: _FakeResponse(
+            {
+                "results": [
+                    {
+                        "url": "https://ok.example/",
+                        "full_content": "Page body.",
+                        "excerpts": [],
+                    }
+                ],
+                "errors": [
+                    {
+                        "url": "https://blocked.example",
+                        "error_type": "fetch_error",
+                        "http_status_code": 403,
+                        "content": None,
+                    }
+                ],
+            }
+        ),
+    )
+
+    result = tool._do_get_contents(["https://ok.example", "https://blocked.example"])
+
+    assert result["success"] is True
+    assert result["provider"] == "parallel"
+    assert result["urls"] == ["https://ok.example"]
+    assert result["failed_urls"] == ["https://blocked.example"]
+    assert "Parallel Extract" in result["warning"]
+    assert "1 of 2" in result["warning"]
 
 
 def test_do_search_reports_the_provider_it_used(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -742,6 +843,20 @@ def test_parallel_spreads_excerpt_budget_and_strips_trailing_whitespace(
     assert f"{headers[1]}\n\nb" in content
     assert "\n\n\n\n### Second" not in content
     assert content.endswith("[excerpts truncated to preserve source links]")
+
+
+def test_parallel_redistributes_unused_excerpt_budget() -> None:
+    results = [
+        ("### Long\nhttps://long.example", "a" * 3500),
+        *[(f"### Short {index}\nhttps://short{index}.example", "b" * 100) for index in range(4)],
+    ]
+
+    content = tool._parallel_result_content(results)
+
+    assert "a" * 3500 in content
+    assert content.count("b" * 100) == 4
+    assert "[excerpts truncated" not in content
+    assert len(content) <= tool._PARALLEL_MAX_CHARS
 
 
 def test_parallel_strips_trailing_excerpt_whitespace() -> None:
